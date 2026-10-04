@@ -261,6 +261,47 @@ R/B/I에 따라 원소 문자열을 모은 뒤 `fractions.Fraction`으로 바꿉
 
 ## 3. 사용법
 
+### det / REF / RREF 계산 (`solve.py`)
+
+입력을 해석한 뒤 정확한 분수로 det, REF, RREF, rank를 계산합니다.
+**해석이 모호하면 확신도 5% 이상인 후보를 모두 계산해서 보여줍니다.**
+
+```
+$ python -m matrix_ml.solve "12 34 56 78"
+입력이 모호합니다. 가능한 해석 3개를 모두 계산합니다.
+
+=== 후보 1: 2x2 행렬 (확신도 69.6%) ===
+    [ 12  34 ]
+    [ 56  78 ]
+  det = -968   (가역)
+  REF:
+    [    1  17/6 ]
+    [    0     1 ]
+  RREF:
+    [ 1  0 ]
+    [ 0  1 ]
+  rank = 2   피벗 열: 1, 2
+
+=== 후보 2: 1x4 행렬 (확신도 23.2%) ===
+    ...
+=== 후보 3: 2x4 행렬 (확신도 5.7%) ===
+    ...
+```
+
+```bash
+python -m matrix_ml.solve "123 453 623"           # 한 번에 계산
+python -m matrix_ml.solve --steps "1 2; 3 4"      # 행 연산 과정(R2 ← R2 − 3R1 …)까지 출력
+python -m matrix_ml.solve "1 2\n3 4"              # 명령줄에서 줄바꿈은 \n
+python -m matrix_ml.solve --min-conf 0.01 "..."   # 확신도 1% 이상 후보까지 모두 계산
+python -m matrix_ml.solve                         # 대화형: 여러 줄로 입력하고 빈 줄을 치면 계산, q로 종료
+```
+
+- det는 정사각 행렬에서만 계산합니다. 정사각이 아닌 후보는 "정의되지 않음"으로 표시하고 REF/RREF는 그대로 계산합니다.
+- REF는 유일하지 않습니다. 여기서는 왼쪽 열부터 위에서 첫 번째로 0이 아닌 행을 피벗으로 고르고, 피벗을 1로 만드는(선행 1) 규칙을 씁니다. RREF는 유일합니다.
+- 계산은 `linalg.py`에 numpy 없이 `fractions.Fraction`으로 구현했습니다. 그래서 `1/3` 같은 값도 오차가 없습니다.
+
+### 해석만 하기 / 학습 / 테스트
+
 ```bash
 pip install numpy
 
@@ -292,7 +333,9 @@ cands[0]["confidence"]  # 0.99...
 | `decode.py` | 제약 Viterbi 디코딩, 정사각 접기 + 모양 prior, 숫자 파싱 |
 | `train.py` | Adam + 코사인 감쇠 학습 루프 |
 | `evaluate.py` | 문자/argmax/top-1/top-3/형식별 정확도 |
-| `infer.py` | `parse_matrix()` API와 CLI |
+| `infer.py` | `parse_matrix()` API와 CLI (해석만) |
+| `linalg.py` | 정확한 분수 det / REF / RREF / rank, 행 연산 과정 기록 |
+| `solve.py` | 해석 + 계산 CLI, 모호하면 후보 전부 계산, 대화형 모드 |
 | `weights.npz` | 학습된 가중치 (H=4, 기본값) |
 | `weights_h12.npz` | 학습된 가중치 (H=12, `--weights matrix_ml/weights_h12.npz`) |
 
@@ -301,4 +344,4 @@ cands[0]["confidence"]  # 0.99...
 - **원래 모호한 입력**은 확신도와 함께 여러 후보를 돌려줍니다. UI에서 확인 단계를 두는 것을 전제로 합니다.
 - 7×7보다 큰 행렬, 복소수, 문자 변수(`a`, `x`)는 학습 데이터에 없습니다. 생성기에 추가하고 다시 학습하면 됩니다.
 - 실제 사용자 입력 로그를 모아 합성 데이터에 섞으면 관례가 실제 사용 습관에 더 가까워집니다.
-- 이 모듈은 "입력 해석"만 담당합니다. det/REF/RREF 계산은 결과(`Fraction` 행렬)를 sympy 같은 정확한 계산 엔진에 넘기면 됩니다.
+- 해석 결과는 `solve.py`가 det/REF/RREF로 계산합니다. 역행렬이나 고윳값처럼 다른 연산이 필요하면 `linalg.py`에 추가하면 됩니다.
