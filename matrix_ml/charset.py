@@ -69,6 +69,8 @@ def normalize(text, labels=None):
     chars, ids, labs = [], [], []
     for k, ch in enumerate(text):
         c = char_class(ch)
+        if c == CLS["MINUS"]:
+            ch = "-"  # 유니코드 마이너스(−, –)도 숫자로 읽을 수 있게 ASCII로
         if ids and c == ids[-1] and c in (CLS["SPACE"], CLS["OTHER"]):
             continue
         chars.append(ch)
