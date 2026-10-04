@@ -212,13 +212,21 @@ def decode(logp, chars, ids, square=False, max_dim=8, top_k=3, flat_square_prior
         cands.append({"matrix": m, "shape": (r, c), "logprob": score, "labels": labels})
     if not cands:
         return []
-    cands.sort(key=lambda d: -d["logprob"])
     scores = np.array([d["logprob"] for d in cands])
     probs = np.exp(scores - scores.max())
     probs /= probs.sum()
-    for d, pr in zip(cands, probs):
-        d["confidence"] = float(pr)
-    return cands[:top_k]
+    # 서로 다른 라벨열이 같은 행렬을 만들 수 있음 (예: 줄바꿈으로 읽은 3×3과 나열을 접은 3×3).
+    # 같은 사건이므로 확률을 더하고, 대표 라벨열은 점수가 가장 높은 것을 씀
+    merged = {}
+    for d, pr in sorted(zip(cands, probs), key=lambda x: -x[1]):
+        key = tuple(map(tuple, d["matrix"]))
+        if key in merged:
+            merged[key]["confidence"] += float(pr)
+        else:
+            d["confidence"] = float(pr)
+            merged[key] = d
+    out = sorted(merged.values(), key=lambda d: -d["confidence"])
+    return out[:top_k]
 
 
 def greedy(logp, chars):

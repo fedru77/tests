@@ -18,6 +18,8 @@ def _sample_values(rows, cols, rng, style):
             return str(rng.randint(0, 9))
         if style == "small":
             return str(rng.randint(-20, 20))
+        if style == "pos":  # 부호 없는 여러 자리 정수: "12 34 56 78" 같은 입력을 위해
+            return str(rng.randint(10, 99) if rng.random() < 0.6 else rng.randint(0, 999))
         if style == "big":
             v = rng.randint(-999, 999) if rng.random() < 0.8 else rng.randint(-99999, 99999)
             return str(v)
@@ -221,7 +223,7 @@ def sample(rng=random):
         rows, cols = rng.randint(1, 6), rng.randint(1, 6)
         if rng.random() < 0.5:
             cols = rows  # 정사각 행렬 비중을 높임 (det 용도)
-        style = rng.choice(["digit", "small", "small", "big", "decimal", "fraction"])
+        style = rng.choice(["digit", "small", "small", "pos", "pos", "big", "decimal", "fraction"])
     elif fmt == "concat_rows":
         rows, cols = rng.randint(2, 6), rng.randint(2, 6)
         if rng.random() < 0.7:
@@ -229,7 +231,7 @@ def sample(rng=random):
         style = "digit"
     elif fmt == "flat_square":
         rows = cols = rng.randint(2, 6)
-        style = rng.choice(["digit", "small", "small", "big", "decimal", "fraction"])
+        style = rng.choice(["digit", "small", "small", "pos", "pos", "big", "decimal", "fraction"])
     else:
         rows = cols = rng.randint(2, 4)
         style = "digit"
