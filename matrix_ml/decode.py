@@ -4,13 +4,23 @@
 행마다 원소 수가 다르거나(3,3,2), 숫자 중간이 끊기는 결과가 나올 수 있습니다.
 그래서 다음 하드 제약을 만족하는 라벨열 중 로그확률 합이 최대인 것을 동적계획법(Viterbi)으로 찾습니다.
 
-  [문자 제약]
-    - 숫자 문자:       I / B / R 만 가능 (숫자는 반드시 어떤 원소에 속함)
-    - 부호(- +):       B / R / O
-    - 소수점:          O / I / B / R (".5"처럼 원소를 시작할 수도 있음)
-    - 분수선:          I / O
-    - 나머지 구분자:   O 만 가능
-    - I 는 바로 앞 글자가 숫자의 일부일 때만 가능 (원소는 연속된 글자)
+  [문자 제약]  직전 글자의 "모드"를 상태로 두고, 상태 전이표로 표현합니다.
+    모드: OUT(숫자 밖) / ROW(숫자 밖, 행 구분자를 지나옴) / FIRST(원소를 시작한 숫자 한 글자)
+          NUM(여러 글자 숫자 안) / SPLIT(붙여 쓴 한 자리 숫자들)
+    - 숫자:    OUT/ROW→B/R→FIRST,  FIRST→I→NUM,  NUM→I→NUM,  FIRST/SPLIT→B/R→SPLIT
+               즉 숫자 덩어리 하나는 "통째로 한 숫자"(401)이거나 "전부 한 자리씩"(4,0,1)이고,
+               "40"과 "1"처럼 섞어 자르는 해석은 금지
+    - 부호(- +): O 또는 B/R→NUM (부호는 원소를 시작함)
+    - 소수점:  O,  FIRST/NUM→I→NUM,  OUT/ROW→B/R→NUM (".5")
+    - 분수선:  O,  FIRST/NUM→I→NUM
+    - 나머지:  O.  행 구분자(줄바꿈 ; | \ 괄호)면 ROW로, 아니면 OUT으로 (ROW는 다음 숫자까지 유지)
+  [전역 규약]  한 입력 안에서 두 규약을 섞지 않습니다.
+    - 숫자 모드: 모든 숫자 덩어리가 각각 한 숫자 (SPLIT 금지)        예) 12 34 56 78 → 12, 34, ...
+    - 분할 모드: 모든 원소가 한 자리 숫자 (I 금지, 붙여쓰기 입력)     예) 123 453 623 → 1, 2, 3, ...
+    그래서 각 모양마다 두 모드로 한 번씩 디코딩합니다. "12 34 5 6 78" 같은 섞인 해석이 사라집니다.
+    분할 모드에서 1행 해석은 n×n으로 접힐 때만 허용합니다 ("453"을 [4,5,3]으로 자르지 않음).
+    숫자 모드에서 R(새 행)은 ROW 모드에서만 가능합니다. 공백/쉼표만으로는 행이 바뀌지 않으므로
+    "401 82 973 341"이 4×1 열벡터로 읽히지 않습니다. (분할 모드의 "123 453"은 공백이 행 구분)
   [모양 제약]  행렬 크기 (r, c)를 정해 두고
     - 원소를 시작(B/R)할 때마다 원소 번호 e가 1 증가
     - R 은 e % c == 0 일 때만,  B 는 e % c != 0 일 때만
@@ -43,86 +53,96 @@ _INNER = {CLS["DOT"], CLS["SLASH"]}
 _NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)(/\d+)?$")
 
 
-def allowed_labels(cls_id):
-    """문자 클래스별로 가능한 라벨 마스크 (O, I, B, R)"""
+# 직전 글자의 모드
+OUT, FIRST, NUM, SPLIT, ROW = 0, 1, 2, 3, 4
+NUM_MODES = 5
+_ANY = (OUT, FIRST, NUM, SPLIT, ROW)
+_GAP = (OUT, ROW)
+_ROW_SEP = {CLS[k] for k in ("NEWLINE", "SEMI", "PIPE", "BACKSLASH", "LBRACK", "RBRACK")}
+
+
+def _sep(cls_id):
+    """구분자 O 전이: 행 구분자면 ROW로, 아니면 OUT으로. 이미 ROW면 유지"""
+    to = ROW if cls_id in _ROW_SEP else OUT
+    return [(m, O, ROW if m == ROW else to) for m in _ANY]
+
+
+def transitions(cls_id):
+    """문자 클래스별 허용 전이 목록: (이전 모드, 라벨, 다음 모드)"""
     if cls_id == _DIGIT:
-        return (False, True, True, True)
+        return ([(m, lab, FIRST) for m in _GAP for lab in (B, R)]
+                + [(m, lab, SPLIT) for m in (FIRST, SPLIT) for lab in (B, R)]
+                + [(FIRST, I, NUM), (NUM, I, NUM)])
     if cls_id in _SIGN:
-        return (True, False, True, True)
+        return _sep(cls_id) + [(m, lab, NUM) for m in _ANY for lab in (B, R)]
     if cls_id == CLS["DOT"]:
-        return (True, True, True, True)
+        return (_sep(cls_id) + [(FIRST, I, NUM), (NUM, I, NUM)]
+                + [(m, lab, NUM) for m in _GAP for lab in (B, R)])
     if cls_id == CLS["SLASH"]:
-        return (True, True, False, False)
-    return (True, False, False, False)
+        return _sep(cls_id) + [(FIRST, I, NUM), (NUM, I, NUM)]
+    return _sep(cls_id)
 
 
-def _viterbi_shape(logp, ids, rows, cols):
+_ALLOWED = {}
+
+
+def _allowed(cls_id, split_mode):
+    """전역 규약에 맞는 전이만 남김 (결과는 캐시)"""
+    key = (cls_id, split_mode)
+    if key not in _ALLOWED:
+        trs = transitions(cls_id)
+        if split_mode:
+            trs = [tr for tr in trs if tr[1] != I]
+        else:
+            trs = [tr for tr in trs if tr[2] != SPLIT and (tr[1] != R or tr[0] == ROW)]
+        _ALLOWED[key] = trs
+    return _ALLOWED[key]
+
+
+def _viterbi_shape(logp, ids, rows, cols, split_mode=False):
     """주어진 (rows, cols)에서 제약을 만족하는 최고 점수 라벨열. 불가능하면 None.
 
-    상태 = (e: 지금까지 시작한 원소 수 0..N,  inside: 직전 글자가 숫자의 일부인가)
+    상태 = (모드 5종, e: 지금까지 시작한 원소 수 0..N)
     numpy 벡터 연산으로 e 축 전체를 한 번에 갱신합니다.
     """
     N = rows * cols
     T = len(ids)
     e = np.arange(N + 1)
-    can_R = (e % cols == 0) & (e < N)   # 원소 e를 R로 시작할 수 있나
-    can_B = (e % cols != 0) & (e < N)
+    start_ok = {R: (e % cols == 0) & (e < N),   # 원소 e를 R로 시작할 수 있나
+                B: (e % cols != 0) & (e < N)}
 
-    out = np.full(N + 1, NEG)  # inside=False
-    inn = np.full(N + 1, NEG)  # inside=True
-    out[0] = 0.0
-    # 역추적용: 각 시점, 각 (e, inside)에 대해 (이전 inside, 라벨) 저장
-    bp_out = np.zeros((T, N + 1), dtype=np.int8)  # 이전 inside (라벨은 항상 O)
-    bp_in = np.zeros((T, N + 1, 2), dtype=np.int8)  # (이전 inside, 라벨)
+    score = np.full((NUM_MODES, N + 1), NEG)
+    score[ROW, 0] = 0.0  # 입력의 시작은 행의 시작
+    # 역추적용: 각 시점, 각 (모드, e)에 대해 (이전 모드, 라벨)
+    bp = np.zeros((T, NUM_MODES, N + 1, 2), dtype=np.int8)
 
     for t in range(T):
-        aO, aI, aB, aR = allowed_labels(ids[t])
         lp = logp[t]
-        best_prev = np.maximum(out, inn)
-        prev_flag = (inn > out).astype(np.int8)
+        new = np.full((NUM_MODES, N + 1), NEG)
+        for frm, lab, to in _allowed(ids[t], split_mode):
+            cand = score[frm] + lp[lab]
+            if lab in (B, R):  # 원소 시작: e → e+1
+                src = np.where(start_ok[lab], cand, NEG)
+                cand = np.full(N + 1, NEG)
+                cand[1:] = src[:-1]
+            better = cand > new[to]
+            new[to] = np.where(better, cand, new[to])
+            bp[t, to, better] = (frm, lab)
+        score = new
 
-        new_out = np.full(N + 1, NEG)
-        new_in = np.full(N + 1, NEG)
-        if aO:
-            new_out = best_prev + lp[O]
-            bp_out[t] = prev_flag
-        if aI:
-            cand = inn + lp[I]
-            better = cand > new_in
-            new_in = np.where(better, cand, new_in)
-            bp_in[t, better] = (1, I)
-        # 원소 시작: e → e+1
-        for lab, ok, mask in ((B, aB, can_B), (R, aR, can_R)):
-            if not ok:
-                continue
-            src = np.where(mask, best_prev + lp[lab], NEG)
-            cand = np.full(N + 1, NEG)
-            cand[1:] = src[:-1]
-            flags = np.zeros(N + 1, dtype=np.int8)
-            flags[1:] = prev_flag[:-1]
-            better = cand > new_in
-            new_in = np.where(better, cand, new_in)
-            bp_in[t, better, 0] = flags[better]
-            bp_in[t, better, 1] = lab
-        out, inn = new_out, new_in
-
-    if max(out[N], inn[N]) <= NEG / 2:
+    best_mode = int(score[:, N].argmax())
+    if score[best_mode, N] <= NEG / 2:
         return None
     # 역추적
     labels = [0] * T
-    state_e, inside = N, int(inn[N] > out[N])
-    score = max(out[N], inn[N])
+    mode, state_e = best_mode, N
     for t in reversed(range(T)):
-        if inside:
-            prev_inside, lab = bp_in[t, state_e]
-            labels[t] = int(lab)
-            if lab in (B, R):
-                state_e -= 1
-            inside = int(prev_inside)
-        else:
-            labels[t] = O
-            inside = int(bp_out[t, state_e])
-    return float(score), labels
+        frm, lab = bp[t, mode, state_e]
+        labels[t] = int(lab)
+        if lab in (B, R):
+            state_e -= 1
+        mode = int(frm)
+    return float(score[best_mode, N]), labels
 
 
 def labels_to_matrix(chars, labels):
@@ -187,29 +207,40 @@ def decode(logp, chars, ids, square=False, max_dim=8, top_k=3, flat_square_prior
 
     flat_square_prior: 행 구분자 없이 n² 개가 나열된 입력을 n×n으로 볼 사전확률
     """
+    # 두 자리 이상 이어진 숫자 덩어리가 없으면 두 모드의 결과가 같으므로 숫자 모드만
+    has_multi = any(a == _DIGIT and b == _DIGIT for a, b in zip(ids, ids[1:]))
+    modes = (False, True) if has_multi else (False,)
     cands = []
     for r, c in candidate_shapes(ids, max_dim):
         if square and r != c and not (r == 1 and _square_side(c)):
             continue
-        res = _viterbi_shape(logp, ids, r, c)
-        if res is None:
-            continue
-        score, labels = res
-        m = labels_to_matrix(chars, labels)
-        try:
-            [[to_number(x) for x in row] for row in m]
-        except ValueError:
-            continue  # "1/" 처럼 숫자로 읽을 수 없는 원소가 생기면 버림
-        n = _square_side(c) if r == 1 else None
-        if n:
-            cands.append({"matrix": fold_square(m[0]), "shape": (n, n),
-                          "logprob": score + np.log(flat_square_prior), "labels": labels})
-            score += np.log(1 - flat_square_prior)
-            if square:
+        for split_mode in modes:
+            res = _viterbi_shape(logp, ids, r, c, split_mode)
+            if res is None:
                 continue
-        elif r == 1 and c > max_dim:
-            continue  # 접을 수 없는 긴 행 벡터는 후보에서 제외
-        cands.append({"matrix": m, "shape": (r, c), "logprob": score, "labels": labels})
+            score, labels = res
+            m = labels_to_matrix(chars, labels)
+            try:
+                [[to_number(x) for x in row] for row in m]
+            except ValueError:
+                continue  # "1/" 처럼 숫자로 읽을 수 없는 원소가 생기면 버림
+            n = _square_side(c) if r == 1 else None
+            if split_mode and r == 1 and not n:
+                continue  # 붙여쓰기는 2행 이상이거나 n×n으로 접힐 때만 ("453"을 4,5,3으로 자르지 않음)
+            if n and split_mode:
+                # 붙여쓴 1×n²는 n×n으로만 해석 (다른 해석이 없으니 prior도 불필요)
+                cands.append({"matrix": fold_square(m[0]), "shape": (n, n),
+                              "logprob": score, "labels": labels})
+                continue
+            if n:
+                cands.append({"matrix": fold_square(m[0]), "shape": (n, n),
+                              "logprob": score + np.log(flat_square_prior), "labels": labels})
+                score += np.log(1 - flat_square_prior)
+                if square:
+                    continue
+            elif r == 1 and c > max_dim:
+                continue  # 접을 수 없는 긴 행 벡터는 후보에서 제외
+            cands.append({"matrix": m, "shape": (r, c), "logprob": score, "labels": labels})
     if not cands:
         return []
     scores = np.array([d["logprob"] for d in cands])
